@@ -160,6 +160,22 @@ dialog p { margin: 4px 0; }
 .rank td:last-child { text-align: right; font-family: var(--font-title); font-weight: 800; font-size: 22px; }
 .note { color: var(--muted); font-size: 14px; }
 
+#printSheet { display: none; }
+@media print {
+  @page { size: letter landscape; margin: 0.35in; }
+  html, body { background: #fff !important; color: #17324A; padding: 0; }
+  body.fitting { overflow: visible; }
+  .wrap, dialog { display: none !important; }
+  #printSheet { display: block; width: 10.3in; font-family: var(--font-body); color: #17324A; }
+  #printSheet * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .ps-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.08in; }
+  .ps-head h1 { font-family: var(--font-title); font-weight: 800; font-size: 28pt; color: #1E6F8A; margin: 0; }
+  .ps-head span { font-family: var(--font-title); font-weight: 600; font-size: 16pt; }
+  .ps-row { display: flex; gap: 0.2in; height: 6.75in; }
+  .ps-map { flex: 1; height: 100%; }
+  .ps-tide { width: 1.75in; height: 100%; }
+  .ps-foot { font-size: 9.5pt; margin-top: 0.06in; line-height: 1.35; }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -172,6 +188,7 @@ dialog p { margin: 4px 0; }
     </div>
     <div class="top-btns">
       <button class="btn-quiet" id="fitBtn" aria-pressed="true">Fit to screen</button>
+      <button class="btn-quiet" id="printBtn">Print map</button>
       <button class="btn-quiet" id="rulesBtn">How to play</button>
       <button class="btn-quiet" id="newBtn">New game</button>
     </div>
@@ -205,6 +222,8 @@ dialog p { margin: 4px 0; }
   </div>
 </div>
 
+<div id="printSheet" aria-hidden="true"></div>
+
 <dialog id="setup">
   <h2>New game</h2>
   <h3>How many shell seekers?</h3>
@@ -228,9 +247,11 @@ dialog p { margin: 4px 0; }
   <h2>How to play</h2>
   <p>You are shell seekers on a tidal island. Collect shells and bring them back to your boat before the sea catches you!</p>
   <h3>On your turn</h3>
-  <p>Roll the die and walk up to that many hexes, one step at a time. You can’t walk on water. Step on a shell to pick it up. You can carry <b>3 shells</b> at a time.</p>
-  <h3>Bank your shells</h3>
-  <p>Shells only count once you step into <b>your boat</b>. Shells you are still carrying at the end are worth nothing.</p>
+  <p>Roll the die and move up to that many hexes, one step at a time. You can’t walk on water. Step on a shell to pick it up. You can carry <b>3 shells</b> at a time.</p>
+  <h3>Your boat</h3>
+  <p><b>In your boat, you move on water. On foot, you move on land.</b> If you start your turn in your boat, you can row across any water hex (even flooded land), then step out onto dry land with the steps you have left. Your boat stays where you leave it.</p>
+  <p>Shells only count once you climb back into <b>your boat</b>, wherever it is. Climbing in ends your move. Shells you are still carrying at the end are worth nothing.</p>
+  <p>If the tide goes out and leaves your boat on dry land, it is <b>beached</b>. You can still climb in to bank, but it can’t row until the water comes back.</p>
   <h3>Shell values</h3>
   <p>Low beaches (heights 1–4) have 3-point shells. Middle ground (5–8) has 2-point shells. High ground (9–12) has 1-point shells.</p>
   <h3>The tide</h3>
@@ -296,11 +317,11 @@ dialog p { margin: 4px 0; }
   let cells = new Map();
   let seed = 0;
 
-  function generate(sd, nPlayers) {
+  function generate(sd) {
     const rnd = mulberry32(sd);
     const all = [];
     for (let q = -R; q <= R; q++) for (let r = -R; r <= R; r++) {
-      const c = { q, r, land: false, h: 0, raw: 0, shells: [], boat: -1 };
+      const c = { q, r, land: false, h: 0, raw: 0, shells: [], dock: -1 };
       if (hexDist(c, { q: 0, r: 0 }) <= R) all.push(c);
     }
     const center = { q: (rnd() - .5) * 1.4, r: (rnd() - .5) * 1.4 };
@@ -345,8 +366,8 @@ dialog p { margin: 4px 0; }
     const cands = all.filter(c => !c.land && nbrs(c).some(n => n.land));
     const off = rnd() * Math.PI * 2;
     const boats = [];
-    for (let i = 0; i < nPlayers; i++) {
-      const want = off + i * Math.PI * 2 / nPlayers;
+    for (let i = 0; i < 4; i++) {
+      const want = off + i * Math.PI / 2;
       let pick = null, pd = Infinity;
       for (const c of cands) {
         if (boats.some(b => hexDist(b, c) < 3)) continue;
@@ -355,7 +376,7 @@ dialog p { margin: 4px 0; }
         if (da > Math.PI) da = Math.PI * 2 - da;
         if (da < pd) { pd = da; pick = c; }
       }
-      pick.boat = i; boats.push(pick);
+      pick.dock = i; boats.push(pick);
     }
     // shells
     for (const c of land) {
@@ -363,7 +384,7 @@ dialog p { margin: 4px 0; }
       const chance = v === 3 ? .45 : v === 2 ? .33 : .22;
       if (rnd() < chance) c.shells.push(v);
     }
-    return { map, boats };
+    return { map, docks: boats };
   }
 
   // ---------------- game state ----------------
@@ -377,17 +398,38 @@ dialog p { margin: 4px 0; }
   function cell(k) { return cells.get(k); }
   function nbrKeys(k) { const c = cell(k); return DIRS.map(([dq, dr]) => key(c.q + dq, c.r + dr)).filter(x => cells.has(x)); }
   function isDry(c) { return c.land && c.h > G.tide; }
-  function passable(k, pi) { const c = cell(k); return c && (isDry(c) || c.boat === pi); }
+  function isWater(c) { return !c.land || c.h <= G.tide; }
+  function boatOwnerAt(k) { return G.players.findIndex(p => p.boat === k); }
+  function inBoat(p) { return p.pos === p.boat; }
+  function floating(p) { return isWater(cell(p.boat)); }
+  // Which hexes can player pi step to from hex `from`? inB = currently in their boat.
+  // In a boat you row across water; on foot you walk on dry land.
+  function stepOptions(pi, from, inB) {
+    const p = G.players[pi], out = [];
+    for (const n of nbrKeys(from)) {
+      const c = cell(n), owner = boatOwnerAt(n);
+      if (inB) {
+        if (isWater(c) && isWater(cell(from)) && owner < 0) out.push({ k: n, row: true });
+        else if (isDry(c) && owner < 0) out.push({ k: n, row: false });
+      } else {
+        if (n === p.boat) out.push({ k: n, board: true });
+        else if (isDry(c) && owner < 0) out.push({ k: n, row: false });
+      }
+    }
+    return out;
+  }
+  const DOCK_USE = { 2: [0, 2], 3: [0, 1, 2], 4: [0, 1, 2, 3] };
   function cur() { return G.players[G.cur]; }
 
   function newGame(keepIsland) {
     if (!keepIsland || !seed) seed = 1000 + Math.floor(Math.random() * 9000);
-    const { map, boats } = generate(seed, setupCount);
+    const { map, docks } = generate(seed);
     cells = map;
+    const use = DOCK_USE[setupCount];
     G = {
       players: setupPlayers.slice(0, setupCount).map((p, i) => ({
         name: p.name || PCOLORS[i].name, cpu: p.cpu, color: PCOLORS[i].c,
-        boat: key(boats[i].q, boats[i].r), pos: key(boats[i].q, boats[i].r), carry: [], banked: 0,
+        dock: use[i], boat: key(docks[use[i]].q, docks[use[i]].r), pos: key(docks[use[i]].q, docks[use[i]].r), carry: [], banked: 0,
       })),
       cur: 0, round: 1, tide: 0, dir: 1, tidesDone: 0, tidesTotal: setupLen,
       phase: 'roll', steps: 0, log: [],
@@ -395,6 +437,7 @@ dialog p { margin: 4px 0; }
     $('islandName').textContent = `Island #${seed}`;
     try { history.replaceState(null, '', '#island-' + seed); } catch (e) {}
     buildBoard();
+    buildPrintSheet();
     setDie(0); drawD4(0, false); $('steps').textContent = '';
     addLog(`Low tide on Island #${seed}. The beaches are open!`);
     startTurn();
@@ -442,14 +485,16 @@ dialog p { margin: 4px 0; }
     }
     svg.innerHTML = defs + `<rect x="${-ext*3}" y="${-exty*3}" width="${ext*6}" height="${exty*6}" fill="#155A73"/><rect x="${-ext*1.6}" y="${-exty*1.6}" width="${ext*3.2}" height="${exty*3.2}" fill="url(#sea)"/>` + waves +
       `<g id="landLayer">${land}</g><g id="shellLayer"></g><g id="waterLayer">${water}</g><g>${marks}</g>
-       <g id="boatLayer"></g><g id="hlLayer">${hits}</g><g id="pawnLayer"></g>`;
-    // boats
-    let boats = '';
-    G.players.forEach((p, i) => {
-      const c = cell(p.boat), q = px(c.q, c.r);
-      boats += `<g transform="translate(${q.x.toFixed(1)},${(q.y + 2).toFixed(1)})">${boatSvg(p.color)}</g>`;
+       <g id="dockLayer"></g><g id="boatLayer"></g><g id="hlLayer">${hits}</g><g id="pawnLayer"></g>`;
+    // dock posts where each boat starts
+    let docks = '';
+    G.players.forEach(p => {
+      const c = [...cells.values()].find(d => d.dock === p.dock), q = px(c.q, c.r);
+      docks += `<g transform="translate(${q.x.toFixed(1)},${q.y.toFixed(1)})" opacity=".9">
+        <rect x="-13" y="9" width="26" height="6" rx="2" fill="#8A5A2B" stroke="#4A2F15" stroke-width="1"/>
+        <rect x="-11" y="13" width="3" height="7" fill="#4A2F15"/><rect x="8" y="13" width="3" height="7" fill="#4A2F15"/></g>`;
     });
-    $('boatLayer').innerHTML = boats;
+    $('dockLayer').innerHTML = docks;
     // pawns
     let pawns = '';
     G.players.forEach((p, i) => {
@@ -487,11 +532,17 @@ dialog p { margin: 4px 0; }
       else c.shells.slice(0, 3).forEach((v, i) => shells += shellSvg(v, p.x + (i - (Math.min(3, c.shells.length) - 1) / 2) * 10, p.y + 4, .75));
     }
     $('shellLayer').innerHTML = shells;
+    let boats = '';
+    G.players.forEach(p => {
+      const c = cell(p.boat), q = px(c.q, c.r), beached = !floating(p);
+      boats += `<g transform="translate(${q.x.toFixed(1)},${(q.y + 2).toFixed(1)}) rotate(${beached ? -14 : 0})">${boatSvg(p.color)}</g>`;
+    });
+    $('boatLayer').innerHTML = boats;
     G.players.forEach((p, i) => {
       const c = cell(p.pos), q = px(c.q, c.r), o = pawnOffset(i, p.pos);
-      const inBoat = p.pos === p.boat;
+      const ib = inBoat(p);
       const g = $('pawn' + i);
-      g.style.transform = `translate(${(q.x + o.x).toFixed(1)}px,${(q.y + o.y - (inBoat ? 8 : 0)).toFixed(1)}px)`;
+      g.style.transform = `translate(${(q.x + o.x).toFixed(1)}px,${(q.y + o.y - (ib ? 8 : 0)).toFixed(1)}px)`;
       g.querySelector('.ring').setAttribute('opacity', (G.phase !== 'over' && i === G.cur && G.phase !== 'tide') ? 1 : 0);
     });
     // highlights for legal steps
@@ -503,7 +554,7 @@ dialog p { margin: 4px 0; }
   function legalSteps() {
     const s = new Set();
     if (!G || G.phase !== 'move' || cur().cpu || busy || G.steps <= 0) return s;
-    for (const n of nbrKeys(cur().pos)) if (passable(n, G.cur)) s.add(n);
+    for (const o of stepOptions(G.cur, cur().pos, inBoat(cur()))) s.add(o.k);
     return s;
   }
 
@@ -548,7 +599,7 @@ dialog p { margin: 4px 0; }
       d.innerHTML = `<span class="pdot" style="background:${p.color}"></span>
         <span class="pname">${esc(p.name)} ${p.cpu ? '<small>(computer)</small>' : ''}</span>
         <span class="pbank" title="Banked points">${p.banked}</span>
-        <span class="pcarry">${slots}<span>${p.pos === p.boat ? 'in boat' : 'carrying'}</span></span>`;
+        <span class="pcarry">${slots}<span>${inBoat(p) ? (floating(p) ? 'in boat' : 'in boat (beached)') : 'carrying'}</span></span>`;
       box.appendChild(d);
     });
   }
@@ -603,8 +654,11 @@ dialog p { margin: 4px 0; }
       cpuTurn();
       return;
     }
-    const stuck = !nbrKeys(p.pos).some(n => passable(n, G.cur));
-    say(`<b>${esc(p.name)}</b>, your turn. Roll to see how far you can walk.` + (stuck ? ' (The water is all around you. You may have to wait.)' : ''));
+    let tip = '';
+    if (inBoat(p)) tip = floating(p) ? ' You’re in your boat: you can row across water, then step out onto dry land.'
+                                     : ' Your boat is beached on dry land. You can step out, but it can’t row until the water comes back.';
+    const stuck = !stepOptions(G.cur, p.pos, inBoat(p)).length;
+    say(`<b>${esc(p.name)}</b>, your turn. Roll to see how far you can go.` + tip + (stuck ? ' (Nowhere to go right now. You may have to wait.)' : ''));
     setActions([['Roll to move', onRoll]]);
   }
 
@@ -634,8 +688,12 @@ dialog p { margin: 4px 0; }
 
   function stepTo(k) {
     const p = cur(), c = cell(k);
-    p.pos = k; G.steps--;
     let msg = '';
+    if (inBoat(p) && isWater(c)) {
+      p.boat = k; p.pos = k; G.steps--;
+      return 'Rowing...';
+    }
+    p.pos = k; G.steps--;
     if (k === p.boat) {
       const pts = p.carry.reduce((a, b) => a + b, 0);
       if (pts) { p.banked += pts; addLog(`${p.name} banked ${pts} point${pts === 1 ? '' : 's'}.`); toast(`${p.name} banks ${pts}!`); msg = `Back in the boat! You banked <b>${pts}</b> point${pts === 1 ? '' : 's'}.`; }
@@ -659,7 +717,7 @@ dialog p { margin: 4px 0; }
     if (!legalSteps().has(k)) return;
     const msg = stepTo(k);
     afterStep(msg);
-    if (cur().pos === cur().boat && G.steps === 0) setActions([['End turn', endTurn]]);
+    if (inBoat(cur()) && G.steps === 0) setActions([['End turn', endTurn]]);
   }
 
   function endTurn() {
@@ -713,15 +771,15 @@ dialog p { margin: 4px 0; }
 
   function sweepCheck() {
     G.players.forEach(p => {
-      if (p.pos === p.boat) return;
+      if (inBoat(p)) return;
       const c = cell(p.pos);
       if (c.h > G.tide) return;
-      // swept away: drop shells, wash up on nearest dry land
+      // swept away: drop shells, wash up on the nearest dry land
       if (p.carry.length) c.shells.push(...p.carry);
       const lost = p.carry.length; p.carry = [];
       let best = null, bd = Infinity;
       for (const [k, d] of cells) {
-        if (!isDry(d)) continue;
+        if (!isDry(d) || boatOwnerAt(k) >= 0) continue;
         const dist = hexDist(c, d);
         if (dist < bd || (best && dist === bd && d.h > cell(best).h)) { bd = dist; best = k; }
       }
@@ -735,7 +793,7 @@ dialog p { margin: 4px 0; }
     let fresh = 0;
     for (const [k, c] of cells) {
       if (!c.land || c.h !== prevTide) continue;
-      if (c.shells.length || G.players.some(p => p.pos === k)) continue;
+      if (c.shells.length || G.players.some(p => p.pos === k || p.boat === k)) continue;
       if (Math.random() < .3) { c.shells.push(shellValue(c.h)); fresh++; }
     }
     if (fresh) addLog(`The tide left ${fresh} new shell${fresh > 1 ? 's' : ''}.`);
@@ -754,57 +812,72 @@ dialog p { margin: 4px 0; }
   }
 
   // ---------------- computer player ----------------
-  function bfs(from, pi) {
-    const dist = new Map([[from, 0]]), prev = new Map(), q = [from];
+  // Search over (hex, in-boat) states so the computer can plan rowing + walking.
+  function bfs(pi) {
+    const p = G.players[pi];
+    const start = p.pos + '|' + (inBoat(p) ? 1 : 0);
+    const dist = new Map([[start, 0]]), prev = new Map(), q = [start];
     while (q.length) {
-      const k = q.shift();
-      for (const n of nbrKeys(k)) {
-        if (dist.has(n) || !passable(n, pi)) continue;
-        if (cell(n).boat >= 0 && cell(n).boat !== pi) continue;
-        dist.set(n, dist.get(k) + 1); prev.set(n, k); q.push(n);
+      const s = q.shift(), [k, b] = s.split('|');
+      if (b === '1' && k === p.boat && s !== start) continue; // boarded: move ends
+      for (const o of stepOptions(pi, k, b === '1')) {
+        const ns = o.k + '|' + ((o.row || o.board) ? 1 : 0);
+        if (dist.has(ns)) continue;
+        dist.set(ns, dist.get(s) + 1); prev.set(ns, s); q.push(ns);
       }
     }
-    return { dist, prev };
+    return { dist, prev, start };
   }
+
   function firstStep(prev, from, to) {
-    let k = to;
-    while (prev.get(k) !== from) { k = prev.get(k); if (k === undefined) return null; }
-    return k;
+    let s = to;
+    while (prev.get(s) !== from) { s = prev.get(s); if (s === undefined) return null; }
+    return s.split('|')[0];
   }
+
   function cpuPickStep(pi) {
     const p = G.players[pi];
-    const { dist, prev } = bfs(p.pos, pi);
+    const { dist, prev, start } = bfs(pi);
     const danger = h => G.dir > 0 && h <= G.tide + 4;
     const lastEbb = G.tidesDone === G.tidesTotal - 1 && G.dir < 0;
     let best = null, bestScore = 0;
     const carrySum = p.carry.reduce((a, b) => a + b, 0);
-    if (carrySum && dist.has(p.boat)) {
+    const boatState = p.boat + '|1';
+    if (carrySum && !inBoat(p) && dist.has(boatState)) {
       let urgency = p.carry.length >= CARRY ? 4 : 1.2;
       if (lastEbb) urgency *= G.tide <= 4 ? 8 : 3;
-      const sc = carrySum * urgency / (dist.get(p.boat) + .5);
-      if (sc > bestScore) { bestScore = sc; best = p.boat; }
+      if (G.dir > 0) urgency *= 1.5;
+      const sc = carrySum * urgency / (dist.get(boatState) + .5);
+      if (sc > bestScore) { bestScore = sc; best = boatState; }
     }
     if (p.carry.length < CARRY) {
       const room = CARRY - p.carry.length;
-      for (const [k, d] of dist) {
+      for (const [s, d] of dist) {
+        const [k, b] = s.split('|');
         const c = cell(k);
-        if (!c.land || !c.shells.length || d === 0) continue;
-        const v = [...c.shells].sort((a, b) => b - a).slice(0, room).reduce((a, b) => a + b, 0);
+        if (b !== '0' || !c.land || !c.shells.length || d === 0) continue;
+        const v = [...c.shells].sort((a, b2) => b2 - a).slice(0, room).reduce((a, b2) => a + b2, 0);
         const risk = danger(c.h) && d > G.steps ? .45 : 1;
         const sc = v * risk / (d + .5);
-        if (sc > bestScore) { bestScore = sc; best = k; }
+        if (sc > bestScore) { bestScore = sc; best = s; }
       }
     }
-    if (best) return firstStep(prev, p.pos, best) || best;
-    // nothing to chase: head uphill if the water is coming
-    const here = cell(p.pos);
-    if (here.land && danger(here.h)) {
-      let hi = null, hh = here.h;
-      for (const [k, d] of dist) { const c = cell(k); if (c.land && d > 0 && d <= G.steps && c.h > hh) { hh = c.h; hi = k; } }
-      if (hi) return firstStep(prev, p.pos, hi) || hi;
+    if (best) return firstStep(prev, start, best);
+    // nothing to chase: on foot with the water rising, head uphill
+    if (!inBoat(p)) {
+      const here = cell(p.pos);
+      if (danger(here.h)) {
+        let hi = null, hh = here.h;
+        for (const [s, d] of dist) {
+          const [k, b] = s.split('|'), c = cell(k);
+          if (b === '0' && c.land && d > 0 && d <= G.steps && c.h > hh) { hh = c.h; hi = s; }
+        }
+        if (hi) return firstStep(prev, start, hi);
+      }
     }
     return null;
   }
+
   async function cpuTurn() {
     busy = true;
     await sleep(700);
@@ -815,10 +888,10 @@ dialog p { margin: 4px 0; }
     await sleep(500);
     while (G.steps > 0) {
       const k = cpuPickStep(G.cur);
-      if (!k || !passable(k, G.cur)) break;
+      if (!k || !stepOptions(G.cur, cur().pos, inBoat(cur())).some(o => o.k === k)) break;
       const msg = stepTo(k);
       $('steps').textContent = G.steps > 0 ? `${G.steps} step${G.steps === 1 ? '' : 's'} left` : '';
-      if (msg) say(`<b>${esc(cur().name)}</b>: ${msg.replace('You climbed', 'Climbed').replace('You banked', 'banked')}`);
+      if (msg) say(`<b>${esc(cur().name)}</b>: ${msg.replace('You climbed', 'Climbed').replace('You banked', 'banked').replace('Your hands', 'Hands')}`);
       renderAll();
       await sleep(380);
     }
@@ -826,6 +899,66 @@ dialog p { margin: 4px 0; }
     busy = false;
     endTurn();
   }
+
+  // ---------------- printable map ----------------
+  function buildPrintSheet() {
+    const { map } = generate(seed);
+    const all = [...map.values()];
+    const land = all.filter(c => c.land), docks = all.filter(c => c.dock >= 0).sort((a, b) => a.dock - b.dock);
+    const hw = S * SQ3 / 2;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const c of [...land, ...docks]) {
+      const p = px(c.q, c.r);
+      x0 = Math.min(x0, p.x - hw); x1 = Math.max(x1, p.x + hw); y0 = Math.min(y0, p.y - S); y1 = Math.max(y1, p.y + S);
+    }
+    x0 -= 6; y0 -= 6; x1 += 6; y1 += 6;
+    const nearLand = c => !c.land && DIRS.some(([dq, dr]) => { const n = map.get(key(c.q + dq, c.r + dr)); return n && n.land; });
+    let m = `<svg class="ps-map" viewBox="${x0.toFixed(1)} ${y0.toFixed(1)} ${(x1 - x0).toFixed(1)} ${(y1 - y0).toFixed(1)}" xmlns="http://www.w3.org/2000/svg">`;
+    for (const c of all) {
+      if (!nearLand(c)) continue;
+      const p = px(c.q, c.r);
+      m += `<polygon points="${hexPts(p.x, p.y, S - .5)}" fill="#DCEFF4" stroke="#B5DCE6" stroke-width="1"/>`;
+    }
+    for (const c of land) {
+      const p = px(c.q, c.r);
+      m += `<polygon points="${hexPts(p.x, p.y, S - .5)}" fill="${HEX_COLORS[c.h]}" stroke="#17324A" stroke-width="1.2"/>`;
+      m += `<text x="${p.x.toFixed(1)}" y="${(p.y + 5.5).toFixed(1)}" text-anchor="middle" font-size="16" font-weight="800" font-family="Baloo 2, sans-serif" fill="${c.h === 9 ? '#fff' : '#17324A'}" opacity=".85">${c.h}</text>`;
+    }
+    for (const c of docks) {
+      const p = px(c.q, c.r);
+      m += `<polygon points="${hexPts(p.x, p.y, S - .5)}" fill="#FFFDF6" stroke="#8A5A2B" stroke-width="2" stroke-dasharray="4 3"/>`;
+      m += `<g transform="translate(${p.x.toFixed(1)},${(p.y - 3).toFixed(1)}) scale(.8)"><path d="M-15 2 L15 2 L10 11 L-10 11 Z" fill="#fff" stroke="#17324A" stroke-width="1.6"/><rect x="-1" y="-17" width="2" height="19" fill="#17324A"/><path d="M1 -16 L12 -10 L1 -5 Z" fill="#fff" stroke="#17324A" stroke-width="1.2"/></g>`;
+      m += `<circle cx="${(p.x - 13).toFixed(1)}" cy="${(p.y - 13).toFixed(1)}" r="8" fill="#17324A"/><text x="${(p.x - 13).toFixed(1)}" y="${(p.y - 9).toFixed(1)}" text-anchor="middle" font-size="11" font-weight="800" fill="#fff" font-family="Baloo 2, sans-serif">${c.dock + 1}</text>`;
+    }
+    m += '</svg>';
+
+    // tide scale: boxes 0..12 bottom to top, sized for a marker
+    const W = 120, top = 70, box = 34, H = top + 13 * box + 40;
+    let t = `<svg class="ps-tide" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="Baloo 2, sans-serif">`;
+    t += `<text x="${W / 2}" y="18" text-anchor="middle" font-size="18" font-weight="800" fill="#17324A">Tide</text>`;
+    t += `<rect x="8" y="28" width="50" height="30" rx="6" fill="#FBE3DE" stroke="#C2412E" stroke-width="2"/><text x="33" y="41" text-anchor="middle" font-size="10" font-weight="800" fill="#C2412E">Coming</text><text x="33" y="53" text-anchor="middle" font-size="10" font-weight="800" fill="#C2412E">in ▲</text>`;
+    t += `<rect x="62" y="28" width="50" height="30" rx="6" fill="#DCEFF4" stroke="#1E6F8A" stroke-width="2"/><text x="87" y="41" text-anchor="middle" font-size="10" font-weight="800" fill="#1E6F8A">Going</text><text x="87" y="53" text-anchor="middle" font-size="10" font-weight="800" fill="#1E6F8A">out ▼</text>`;
+    for (let h = 0; h <= 12; h++) {
+      const y = top + (12 - h) * box;
+      const fill = h === 0 ? '#BFE3EC' : HEX_COLORS[h];
+      t += `<rect x="14" y="${y}" width="60" height="${box}" fill="${fill}" stroke="#17324A" stroke-width="1.5"/>`;
+      t += `<text x="44" y="${y + 23}" text-anchor="middle" font-size="18" font-weight="800" fill="${h === 9 ? '#fff' : '#17324A'}">${h}</text>`;
+    }
+    const hy = top + (12 - 9) * box;
+    t += `<line x1="8" x2="80" y1="${hy}" y2="${hy}" stroke="#C2412E" stroke-width="3" stroke-dasharray="6 4"/>`;
+    t += `<text x="80" y="${hy + 14}" font-size="10" font-weight="800" fill="#C2412E">High</text><text x="80" y="${hy + 26}" font-size="10" font-weight="800" fill="#C2412E">tide</text>`;
+    const ly = top + 12 * box;
+    t += `<text x="80" y="${ly + 14}" font-size="10" font-weight="800" fill="#1E6F8A">Low</text><text x="80" y="${ly + 26}" font-size="10" font-weight="800" fill="#1E6F8A">tide</text>`;
+    t += `<text x="44" y="${top + 13 * box + 18}" text-anchor="middle" font-size="9.5" fill="#17324A">At or below the</text><text x="44" y="${top + 13 * box + 30}" text-anchor="middle" font-size="9.5" fill="#17324A">marker = underwater</text>`;
+    t += '</svg>';
+
+    $('printSheet').innerHTML = `<div class="ps-head"><h1>Tide Turner</h1><span>Island #${seed}</span></div>
+      <div class="ps-row">${m}${t}</div>
+      <div class="ps-foot"><b>Shells:</b> sand heights 1–4 are worth 3 points, green 5–8 are worth 2, gray 9–12 are worth 1.
+      <b>Docks:</b> 2 players start at docks 1 and 3; 3 players use docks 1, 2 and 3; 4 players use all four.
+      Any hex with a height at or below the tide marker is underwater. Play this island online at Island #${seed}.</div>`;
+  }
+  $('printBtn').addEventListener('click', () => { buildPrintSheet(); try { window.print(); } catch (e) {} });
 
   // ---------------- setup ----------------
   function renderSetup() {
